@@ -1,4 +1,4 @@
-"""Omni Slated Mem Core v0.1.0 — Agent Memory Challenge Cycle 2 entry
+"""Omni Slated Mem Core v0.2.0 — Agent Memory Challenge Cycle 2 entry
 (textual track, academic division).
 
 Three endpoints per the platform contract:
@@ -7,7 +7,9 @@ Three endpoints per the platform contract:
   GET  /health              unauthenticated liveness
 
 Zero-LLM local pipeline: local ONNX embeddings + BM25, RRF fusion,
-local cross-encoder rerank, relevance gating. See README for the method.
+local cross-encoder rerank, relevance gating — plus a memory-management
+layer: contradiction/supersede tracking, temporal understanding, gated
+multi-hop retrieval, and per-session consolidation. See README.
 """
 from __future__ import annotations
 
@@ -104,7 +106,7 @@ def memories_add(req: AddRequest):
 
     if chunks:
         vectors = embedder.embed([c[1] for c in chunks])
-        idx.add(req.user_id, chunks, vectors)
+        idx.add(req.user_id, chunks, vectors, embedder=embedder)
 
     return JSONResponse(
         status_code=200,

@@ -1,4 +1,4 @@
-# Runtime dependencies for Omni Slated Mem Core v0.1.0.
+# Runtime dependencies for Omni Slated Mem Core v0.2.0.
 # Pinned; vendor/wheels/ carries the exact wheels so the Docker build
 # works offline (--no-index --find-links).
 fastapi==0.141.1

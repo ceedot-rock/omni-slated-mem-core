@@ -1,9 +1,9 @@
 # Submission notes (draft) — Agent Memory Challenge Cycle 2
 
-> Draft prepared 2026-09-29. The repository goes public only after
-> Corey Tasz reviews it. Nothing here has been submitted.
+> Draft prepared 2026-09-29, updated for v0.2.0. The repository goes public
+> only after Corey Tasz reviews it. Nothing here has been submitted.
 
-- **System:** Omni Slated Mem Core, version 0.1.0
+- **System:** Omni Slated Mem Core, version 0.2.0
 - **Track:** textual · **Division:** academic (open-source methods)
 - **Entrant:** Corey Ptaszenski — corey@slidphilabs.com
 - **Submission form:** public GitHub repository + Dockerfile (this tree).
@@ -17,7 +17,12 @@ stored per `user_id` (the isolation boundary) and retrieved through a
 zero-LLM local pipeline: local ONNX text embeddings plus BM25, fused with
 reciprocal rank fusion, reranked by a local cross-encoder, and passed
 through a calibrated relevance gate that returns `[]` when nothing is
-relevant. No language-model calls, no API keys, no network access at
+relevant. v0.2.0 adds a memory-management layer: contradiction/supersede
+tracking (new facts atomically supersede contradicted old ones; history
+queries surface the old facts), temporal understanding (time expressions
+in queries boost documents in the parsed window; changeable facts get
+recency preference), gated two-hop retrieval, and per-session
+consolidation. No language-model calls, no API keys, no network access at
 runtime — deterministic and exactly reproducible.
 
 ## Reproducibility
@@ -39,6 +44,11 @@ runtime — deterministic and exactly reproducible.
    tiny recency tie-break → score = sigmoid(logit − threshold).
 3. Concurrency: per-user locks; 200 is returned only after the write is
    searchable; verified with 64 concurrent writers.
+4. Memory management (v0.2.0): structural contradiction detection with
+   atomic supersede linking (precision/recall 1.000/1.000 on a 22-pair
+   synthetic set); temporal parsing + window boost; changeable-fact
+   recency; deterministic gated two-hop retrieval; per-session
+   extractive consolidation.
 
 ## Checklist before going public
 

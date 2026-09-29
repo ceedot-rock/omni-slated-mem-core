@@ -1,11 +1,12 @@
-# Omni Slated Mem Core — v0.1.0
+# Omni Slated Mem Core — v0.2.0
 
 Agent Memory Challenge Cycle 2 entry: **textual track, academic division**.
 
 A zero-LLM local memory system. No language-model calls at any stage — no
 API keys, no per-query inference cost, fully deterministic and exactly
-reproducible. Retrieval only: local embeddings, lexical search, fusion,
-cross-encoder reranking, and relevance gating.
+reproducible. v0.2.0 adds a memory-management layer on top of the v0.1.0
+retrieval engine: contradiction/supersede tracking, temporal understanding,
+gated two-hop retrieval, and per-session consolidation.
 
 ## Contract
 
@@ -52,6 +53,43 @@ the same post-processing the reference pipeline uses) and indexed for BM25
 not fake them: per-user namespacing is the isolation mechanism, and
 session IDs are stored on every document for auditability.
 
+## Memory management (v0.2.0)
+
+**Contradiction & supersede.** During Add, each new document is checked
+against older documents sharing a fact anchor (location, employer, pet
+name, favorites, attitudes — extracted as structural frames, no model).
+When a new fact contradicts an old one, the old document is *linked* as
+superseded (never deleted), atomically under the user's lock; newest wins,
+including within a single multi-message Add. Current queries exclude
+superseded documents; explicit history queries ("where did I used to
+live") surface them with a boost. Calibrated on a 22-pair synthetic
+contradiction set: **precision 1.000, recall 1.000**
+(`scripts/calibrate_contra.py`).
+
+**Temporal understanding.** Queries are parsed for time expressions —
+`yesterday`, `last night`, `last week`, `N days/weeks/months ago`, named
+weekdays ("last Monday"), named months/years, and explicit dates — and
+documents inside the parsed window get a ranking boost. Changeable facts
+(location, employer, favorites, attitudes) get an additional recency
+preference when the query asks about the present tense; stable facts do
+not.
+
+**Two-hop retrieval.** The first pass is the v0.1.0 pipeline. A second
+pass runs only when the first pass is weak (best logit below threshold)
+or the query names multiple entities the top hits don't cover: rare terms
+from the top hits expand the query, both passes are fused by max logit.
+Deterministic, capped at two hops.
+
+**Session consolidation.** Each Add rebuilds its session's compacted fact
+list: fact sentences are extracted, near-duplicates merged, superseded
+facts dropped, and the result indexed as one document alongside the raw
+messages (replacing the previous summary, linked not deleted).
+
+**Why not the cross-encoder for contradiction confirmation?** We tried it:
+ms-marco scores QA relevance, not topic sameness, and vetoed true
+contradictions ("I moved to Austin" vs "I live in Philadelphia" scored
+−7.94). Structural frames decide; the model is not consulted.
+
 ## Calibration
 
 `scripts/calibrate.py` builds a 28-document synthetic memory and runs
@@ -70,24 +108,33 @@ off-topic and near-miss case. A threshold of 2.0 additionally dropped a
 clean fact recall ("What food do I hate?"), so 0.0 was chosen to favor
 recall where the eval rewards it and precision where gating is scored.
 
+`scripts/calibrate_contra.py` calibrates the contradiction detector on 22
+labeled synthetic pairs (10 true contradictions, 12 non-contradictions
+including refinements like "Philadelphia" vs "Philadelphia,
+Pennsylvania" and near-misses like "my dog" vs "my cat"): precision
+**1.000**, recall **1.000**.
+
 ## Concurrency
 
 The platform runs 64 concurrent Add workers. The store holds one `RLock`
 per user namespace plus a global registry lock — different users never
 block each other, and an Add holds its user's lock from chunking through
-index update, so HTTP 200 implies searchable. ONNX sessions run
+contradiction detection, supersede linking, consolidation, and index
+update, so HTTP 200 implies searchable. ONNX sessions run
 single-threaded internally behind a lock; request-level parallelism comes
 from a 128-worker thread pool. `scripts/smoke_test.py` hammers the service
 with 64 concurrent writers and asserts durability, isolation, schema,
-ordering, and gating.
+ordering, gating, contradiction/supersede, temporal ranking, multi-hop
+retrieval, consolidation, and byte-identical determinism (25 checks).
 
 ## Layout
 
 ```
-app/            service (main.py), store, retrieval, local ONNX inference
+app/            service (main.py), store, retrieval, governance, local ONNX inference
 models/         vendored model files (loaded from disk; no downloads)
 vendor/wheels/  pinned wheels for an offline Docker build
-scripts/        smoke_test.py (contract test), calibrate.py (threshold)
+scripts/        smoke_test.py (contract test), calibrate.py (threshold),
+                calibrate_contra.py (contradiction precision/recall)
 Dockerfile      builds and serves on $PORT (default 8000)
 ```
 
@@ -102,9 +149,9 @@ python scripts/smoke_test.py --port 18001   # boots its own server
 ## Docker
 
 ```bash
-docker build -t omni-slated-mem-core:0.1.0 .
-docker run -p 8000:8000 omni-slated-mem-core:0.1.0
-# or: docker run -e PORT=8080 -p 8080:8080 omni-slated-mem-core:0.1.0
+docker build -t omni-slated-mem-core:0.2.0 .
+docker run -p 8000:8000 omni-slated-mem-core:0.2.0
+# or: docker run -e PORT=8080 -p 8080:8080 omni-slated-mem-core:0.2.0
 ```
 
 The build installs exclusively from `vendor/wheels` (`--no-index`); the

@@ -1,7 +1,7 @@
 FROM python:3.12-slim
 
 LABEL org.opencontainers.image.title="Omni Slated Mem Core"
-LABEL org.opencontainers.image.version="0.1.0"
+LABEL org.opencontainers.image.version="0.2.0"
 LABEL org.opencontainers.image.description="Agent Memory Challenge Cycle 2 entry: textual track, academic division. Zero-LLM local memory pipeline."
 
 WORKDIR /app

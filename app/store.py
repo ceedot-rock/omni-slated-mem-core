@@ -8,6 +8,11 @@ by construction.
 Concurrency model: one RLock per user namespace plus a global RLock for the
 user registry. 64 concurrent Add workers each take their own user's lock;
 different users never block each other.
+
+v0.2.0 governance: contradiction / supersede tracking (old facts contradicted
+by new ones are linked, not deleted), an anchor pre-filter index, and
+per-session consolidated fact documents. All of it mutates only under the
+user's lock, so supersede writes are atomic with the Add.
 """
 from __future__ import annotations
 
@@ -61,6 +66,13 @@ class Doc:
     created_at: str
     tokens: list[str] = field(default_factory=list)
     length: int = 0
+    # v0.2.0 governance fields
+    anchors: frozenset = frozenset()          # frame anchors + proper nouns
+    frame_anchors: frozenset = frozenset()    # frame anchor keys only
+    frames: list = field(default_factory=list)  # governance.Frame list
+    superseded_by: int | None = None         # doc index of the contradicting doc
+    supersedes: list = field(default_factory=list)  # doc indices this doc supersedes
+    is_consolidated: bool = False            # per-session compacted fact doc
 
 
 class UserIndex:
@@ -72,6 +84,8 @@ class UserIndex:
         self.embeddings: list[np.ndarray] = []  # parallel to docs; L2-normalized
         self.df: Counter = Counter()            # term -> #docs containing term
         self.total_len = 0
+        self.anchor_index: dict[str, list[int]] = {}   # anchor -> doc indices
+        self.session_consolidated: dict[str, int] = {}  # session_id -> doc index
 
     @property
     def n_docs(self) -> int:
@@ -82,13 +96,27 @@ class UserIndex:
         user_id: str,
         chunks: list[tuple[str, str, str, str, int, str]],
         vectors: np.ndarray,
+        embedder=None,
     ) -> None:
-        """chunks: (doc_id, content, session_id, role, ts_ms, created_at)."""
+        """chunks: (doc_id, content, session_id, role, ts_ms, created_at).
+
+        v0.2.0: under the same lock, runs contradiction detection (new docs
+        supersede contradicted old docs — linked, not deleted) and rebuilds
+        per-session consolidated fact documents. embedder is the local
+        embedding model (needed for consolidated-doc embeddings); when None,
+        consolidation is skipped.
+        """
+        # Local import: governance imports store, so this must not be top-level.
+        from . import governance as gov
+
         with self.lock:
-            for (doc_id, content, session_id, role, ts_ms, created_at), vec in zip(
-                chunks, vectors
-            ):
+            base = len(self.docs)
+            new_docs: list[Doc] = []
+            for k, ((doc_id, content, session_id, role, ts_ms, created_at),
+                    vec) in enumerate(zip(chunks, vectors)):
                 toks = tokenize(content)
+                frames = gov.extract_frames(content)
+                frame_anchors = frozenset(f.anchor for f in frames)
                 doc = Doc(
                     id=doc_id,
                     content=content,
@@ -99,12 +127,101 @@ class UserIndex:
                     created_at=created_at,
                     tokens=toks,
                     length=len(toks),
+                    anchors=gov.extract_anchors(content, frames),
+                    frame_anchors=frame_anchors,
+                    frames=frames,
                 )
+                new_docs.append(doc)
                 self.docs.append(doc)
                 self.embeddings.append(vec)
                 for t in set(toks):
                     self.df[t] += 1
                 self.total_len += len(toks)
+                doc_idx = base + k
+                for a in doc.anchors:
+                    self.anchor_index.setdefault(a, []).append(doc_idx)
+
+            # --- contradiction / supersede detection (newest wins) ---
+            # Candidates are restricted to strictly older docs (index <
+            # doc_idx): within one Add batch, an earlier message can never
+            # be superseded by a later message in the same batch.
+            for k, doc in enumerate(new_docs):
+                doc_idx = base + k
+                cand_idx: set[int] = set()
+                for a in doc.anchors:
+                    cand_idx.update(self.anchor_index.get(a, ()))
+                cand_idx = {i for i in cand_idx if i < doc_idx}
+                candidates = [(i, self.docs[i]) for i in sorted(cand_idx)]
+                hit_idx = gov.detect_contradictions(doc, candidates)
+                for old_idx in hit_idx:
+                    if self.docs[old_idx].superseded_by is None:
+                        self.docs[old_idx].superseded_by = doc_idx
+                        doc.supersedes.append(old_idx)
+
+            # --- per-session consolidation ---
+            if embedder is not None:
+                sessions = list(dict.fromkeys(c[2] for c in chunks))
+                for session_id in sessions:
+                    self._consolidate_session(
+                        gov, user_id, session_id, embedder)
+
+    def _consolidate_session(self, gov, user_id: str, session_id: str,
+                             embedder) -> None:
+        """Rebuild the session's compacted fact list; index it as one doc.
+
+        The new consolidated doc supersedes the previous one for the session
+        (linked, not deleted). Skipped when the fact set is unchanged.
+        Must be called with self.lock held.
+        """
+        facts: list[str] = []
+        session_ts = 0
+        session_created = ""
+        for d in self.docs:
+            if d.session_id != session_id:
+                continue
+            if d.ts_ms >= session_ts:
+                session_ts = d.ts_ms
+                session_created = d.created_at
+            if d.is_consolidated or d.superseded_by is not None:
+                continue
+            facts.extend(gov.extract_fact_sentences(d.content))
+        facts = gov.dedupe_facts(facts)[-config.CONSOLIDATED_MAX_FACTS:]
+        if len(facts) < config.CONSOLIDATED_MIN_FACTS:
+            return
+        content = "\n".join(facts)
+        old_idx = self.session_consolidated.get(session_id)
+        if old_idx is not None and self.docs[old_idx].content == content:
+            return  # unchanged; no churn
+        doc_id = f"{session_id}#consolidated.{len(self.docs)}"
+        toks = tokenize(content)
+        frames = gov.extract_frames(content)
+        doc = Doc(
+            id=doc_id,
+            content=content,
+            user_id=user_id,
+            session_id=session_id,
+            role="system",
+            ts_ms=session_ts,
+            created_at=session_created,
+            tokens=toks,
+            length=len(toks),
+            anchors=gov.extract_anchors(content, frames),
+            frame_anchors=frozenset(f.anchor for f in frames),
+            frames=frames,
+            is_consolidated=True,
+        )
+        if old_idx is not None:
+            doc.supersedes.append(old_idx)
+            self.docs[old_idx].superseded_by = len(self.docs)
+        vec = embedder.embed([content])[0]
+        self.docs.append(doc)
+        self.embeddings.append(vec)
+        for t in set(toks):
+            self.df[t] += 1
+        self.total_len += len(toks)
+        for a in doc.anchors:
+            self.anchor_index.setdefault(a, []).append(len(self.docs) - 1)
+        self.session_consolidated[session_id] = len(self.docs) - 1
 
     def embedding_matrix(self) -> np.ndarray | None:
         with self.lock:

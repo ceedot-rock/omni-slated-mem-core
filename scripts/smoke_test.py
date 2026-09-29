@@ -22,6 +22,13 @@ import subprocess
 import sys
 import time
 import urllib.request
+from pathlib import Path
+
+# Unit-level governance checks run in-process (no models needed for these).
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from app import governance as gov
+from app.retrieval import _expansion_terms, _needs_second_hop
+from app.store import Doc, UserIndex, tokenize
 
 ADD = "/v1/memories/add"
 SEARCH = "/v1/memories/search"
@@ -183,6 +190,135 @@ def main() -> int:
               and body.get("request_id") == "echo-1"
               and body.get("user_id") == "dave"
               and body.get("session_id") == "s1", str(body)[:120])
+
+        # --- 9. contradiction / supersede (v0.2.0) ---
+        now_ms = int(time.time() * 1000)
+        post(base, ADD, {"request_id": "c1", "user_id": "contra1",
+                         "session_id": "cs1",
+                         "messages": [{"role": "user",
+                                       "content": "I live in Philadelphia.",
+                                       "timestamp": now_ms}]})
+        post(base, ADD, {"request_id": "c2", "user_id": "contra1",
+                         "session_id": "cs1",
+                         "messages": [{"role": "user",
+                                       "content": "I moved to Austin, Texas.",
+                                       "timestamp": now_ms}]})
+        code, body = post(base, SEARCH, {
+            "query": "where do I live", "user_id": "contra1", "top_k": 5})
+        data = body.get("data", [])
+        check("supersede: current fact ranks first",
+              data and "Austin" in data[0].get("content", ""),
+              f"top: {data[0].get('content','')[:60] if data else None}")
+        check("supersede: old fact hidden from current query",
+              not any("Philadelphia" in d.get("content", "") for d in data),
+              f"contents: {[d.get('content','')[:40] for d in data]}")
+        code, body = post(base, SEARCH, {
+            "query": "where did I used to live", "user_id": "contra1",
+            "top_k": 5})
+        data = body.get("data", [])
+        check("history query surfaces superseded fact",
+              any("Philadelphia" in d.get("content", "") for d in data),
+              f"contents: {[d.get('content','')[:40] for d in data]}")
+
+        # --- 10. temporal understanding (v0.2.0) ---
+        day_ms = 86_400_000
+        post(base, ADD, {"request_id": "t1", "user_id": "temp1",
+                         "session_id": "t1",
+                         "messages": [{"role": "user",
+                                       "content": "I bought groceries for the week.",
+                                       "timestamp": now_ms - day_ms}]})
+        post(base, ADD, {"request_id": "t2", "user_id": "temp1",
+                         "session_id": "t2",
+                         "messages": [{"role": "user",
+                                       "content": "I bought a car in 2020.",
+                                       "timestamp": now_ms - 60 * day_ms}]})
+        code, body = post(base, SEARCH, {
+            "query": "what did I buy yesterday", "user_id": "temp1",
+            "top_k": 5})
+        data = body.get("data", [])
+        check("temporal: yesterday query prefers yesterday's doc",
+              data and "groceries" in data[0].get("content", ""),
+              f"top: {data[0].get('content','')[:60] if data else None}")
+
+        # --- 11. multi-hop retrieval (v0.2.0) ---
+        post(base, ADD, {"request_id": "h1", "user_id": "hop1",
+                         "session_id": "s1",
+                         "messages": [{"role": "user",
+                                       "content": "Biscuit gets his allergy shots "
+                                                  "at Riverside Clinic.",
+                                       "timestamp": now_ms}]})
+        post(base, ADD, {"request_id": "h2", "user_id": "hop1",
+                         "session_id": "s2",
+                         "messages": [{"role": "user",
+                                       "content": "Riverside Clinic is on 5th Avenue.",
+                                       "timestamp": now_ms}]})
+        code, body = post(base, SEARCH, {
+            "query": "Where does the dog get his allergy treatment?",
+            "user_id": "hop1", "top_k": 5})
+        data = body.get("data", [])
+        check("multi-hop: second-hop fact retrieved",
+              any("5th Avenue" in d.get("content", "") for d in data),
+              f"contents: {[d.get('content','')[:50] for d in data]}")
+
+        # --- 12. session consolidation (v0.2.0) ---
+        post(base, ADD, {"request_id": "s1", "user_id": "cons1",
+                         "session_id": "c1",
+                         "messages": [
+                             {"role": "user",
+                              "content": "Biscuit gets his allergy shots at Riverside Clinic.",
+                              "timestamp": now_ms},
+                             {"role": "user",
+                              "content": "Riverside Clinic is on 5th Avenue.",
+                              "timestamp": now_ms},
+                             {"role": "user",
+                              "content": "Dr. Rivera is Biscuit's vet.",
+                              "timestamp": now_ms},
+                         ]})
+        code, body = post(base, SEARCH, {
+            "query": "Biscuit's vet Riverside Clinic", "user_id": "cons1",
+            "top_k": 5})
+        data = body.get("data", [])
+        check("consolidation: session summary doc is searchable",
+              any("#consolidated" in d.get("id", "") for d in data),
+              f"ids: {[d.get('id','') for d in data]}")
+
+        # --- 13. multi-hop trigger logic, unit level (v0.2.0) ---
+        uidx = UserIndex()
+        for i, (content, anchors) in enumerate([
+            ("Biscuit gets his allergy shots at Riverside Clinic.",
+             frozenset({"biscuit", "riverside", "clinic"})),
+            ("Riverside Clinic is on 5th Avenue.",
+             frozenset({"riverside", "clinic", "5th avenue"})),
+        ]):
+            toks = tokenize(content)
+            uidx.docs.append(Doc(
+                id=f"u{i}", content=content, user_id="x", session_id="s",
+                role="user", ts_ms=0, created_at="", tokens=toks,
+                length=len(toks), anchors=anchors,
+                frame_anchors=frozenset(), frames=[]))
+            uidx.df.update(set(toks))
+        check("multi-hop: weak first pass triggers hop 2",
+              _needs_second_hop("obscure paraphrase query", [0],
+                                [-3.0], uidx) is True)
+        check("multi-hop: strong covered pass does not trigger",
+              _needs_second_hop("Riverside Clinic Biscuit", [0, 1],
+                                [5.0, 4.0], uidx) is False)
+        check("multi-hop: uncovered multi-entity query triggers",
+              _needs_second_hop("Biscuit 5th Avenue", [0],
+                                [5.0], uidx) is True)
+        t1 = _expansion_terms(uidx, "Biscuit", [0])
+        t2 = _expansion_terms(uidx, "Biscuit", [0])
+        check("multi-hop: expansion terms deterministic", t1 == t2,
+              f"{t1} vs {t2}")
+        check("multi-hop: expansion adds novel rare terms",
+              len(t1) > 0 and "biscuit" not in t1, str(t1))
+
+        # --- 14. determinism: same query twice, byte-identical (v0.2.0) ---
+        q = {"query": "where do I live", "user_id": "contra1", "top_k": 5}
+        _, b1 = post(base, SEARCH, q)
+        _, b2 = post(base, SEARCH, q)
+        check("determinism: repeated search byte-identical",
+              json.dumps(b1, sort_keys=True) == json.dumps(b2, sort_keys=True))
 
         print()
         if FAILURES:

@@ -1,10 +1,10 @@
-"""Shared configuration for Omni Slated Mem Core v0.1.0."""
+"""Shared configuration for Omni Slated Mem Core v0.2.0."""
 from __future__ import annotations
 
 from pathlib import Path
 
 SYSTEM_NAME = "Omni Slated Mem Core"
-SYSTEM_VERSION = "0.1.0"
+SYSTEM_VERSION = "0.2.0"
 
 # Repo root resolved from this file so model paths work regardless of CWD.
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -44,6 +44,30 @@ CHUNK_OVERLAP = 40      # overlapping words between consecutive chunks
 # --- BM25 ---
 BM25_K1 = 1.2
 BM25_B = 0.75
+
+# --- v0.2.0 governance tunables ---
+# Temporal boost: additive logit bonus for docs inside the query's parsed
+# time window. Large enough to dominate ranking among topically similar docs.
+TEMPORAL_BOOST = 3.0
+
+# Volatile-fact boost: when the query asks about a changeable attribute in
+# the present tense (location, employer, favorites, attitudes), the newest
+# doc per volatile anchor gets this bonus — newer values win ties.
+VOLATILE_BOOST = 2.0
+
+# History boost: for explicit history queries ("where did I used to live"),
+# superseded docs get this bonus so the old fact surfaces as the answer.
+HISTORY_BOOST = 2.0
+
+# Multi-hop: second retrieval pass triggers when the first pass's best logit
+# is below this, or when the query names 2+ entities the top hits don't
+# cover. Expansion takes this many rare terms from the top-3 hits.
+MULTIHOP_WEAK_THRESHOLD = 1.0
+MULTIHOP_MAX_TERMS = 8
+
+# Consolidation: per-session compacted fact docs.
+CONSOLIDATED_MAX_FACTS = 48   # cap on facts per session doc
+CONSOLIDATED_MIN_FACTS = 2    # don't bother below this many facts
 
 # --- Concurrency ---
 # 64 concurrent Add workers per the platform contract; headroom above that.
