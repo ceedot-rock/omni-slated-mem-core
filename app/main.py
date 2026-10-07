@@ -90,6 +90,36 @@ def health():
     }
 
 
+@app.get("/service/about/endpoints")
+def service_about_endpoints():
+    """Machine-readable service description (outside the platform contract)."""
+    return {
+        "service": config.SYSTEM_NAME,
+        "version": config.SYSTEM_VERSION,
+        "contract_endpoints": [
+            {
+                "method": "POST",
+                "path": "/v1/memories/add",
+                "description": "Store messages; HTTP 200 only after searchable.",
+            },
+            {
+                "method": "POST",
+                "path": "/v1/memories/search",
+                "description": "Retrieve evidence, most-relevant first; [] when nothing is relevant.",
+            },
+            {
+                "method": "GET",
+                "path": "/health",
+                "description": "Unauthenticated liveness: {status, system, version}.",
+            },
+        ],
+        "introspection": {
+            "method": "GET",
+            "path": "/service/about/endpoints",
+        },
+    }
+
+
 @app.post("/v1/memories/add")
 def memories_add(req: AddRequest):
     """Store messages. Returns 200 only after they are searchable."""

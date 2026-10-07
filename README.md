@@ -1,5 +1,7 @@
 # Omni Slated Mem Core — v0.2.0
 
+[![Audited checks](https://github.com/ceedot-rock/omni-slated-mem-core/actions/workflows/audited-checks.yml/badge.svg)](https://github.com/ceedot-rock/omni-slated-mem-core/actions/workflows/audited-checks.yml)
+
 Agent Memory Challenge Cycle 2 entry: **textual track, academic division**.
 
 A zero-LLM local memory system. No language-model calls at any stage — no
