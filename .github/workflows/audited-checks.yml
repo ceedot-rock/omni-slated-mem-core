@@ -1,0 +1,81 @@
+name: Audited checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    name: Contract smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install pinned runtime deps
+        run: pip install --no-cache-dir -r requirements.txt
+      - name: Boot service and run all contract checks
+        run: python scripts/smoke_test.py --port 18001
+
+  version:
+    name: Version strings agree
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: README / config.py / main.py / Dockerfile agree on one version
+        run: |
+          python3 - <<'PY'
+          import re, sys
+
+          readme = open("README.md").read()
+          m = re.search(r"# Omni Slated Mem Core — v(\d+\.\d+\.\d+)", readme)
+          versions = {"README": m.group(1) if m else None}
+
+          cfg = open("app/config.py").read()
+          m = re.search(r'SYSTEM_VERSION = "(\d+\.\d+\.\d+)"', cfg)
+          versions["app/config.py"] = m.group(1) if m else None
+
+          main = open("app/main.py").read()
+          m = re.search(r"Omni Slated Mem Core v(\d+\.\d+\.\d+)", main)
+          versions["app/main.py"] = m.group(1) if m else None
+
+          docker = open("Dockerfile").read()
+          m = re.search(r'org\.opencontainers\.image\.version="(\d+\.\d+\.\d+)"', docker)
+          versions["Dockerfile"] = m.group(1) if m else None
+
+          print(versions)
+          found = {v for v in versions.values() if v}
+          if len(found) != 1 or any(v is None for v in versions.values()):
+              print("FAIL: version strings disagree or are missing")
+              sys.exit(1)
+          print("PASS: all version strings are", found.pop())
+          PY
+
+  secrets:
+    name: No secrets in tracked source
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Scan for common secret patterns
+        run: |
+          # Binary and model blobs excluded; prose may mention "API keys" generically.
+          if git grep -nEi \
+              -e 'AKIA[0-9A-Z]{16}' \
+              -e '-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY' \
+              -e 'sk-live-[0-9A-Za-z]{20,}' \
+              -e 'gh[pousr]_[A-Za-z0-9_]{20,}' \
+              -e 'AIza[0-9A-Za-z_-]{35}' \
+              -e 'xox[baprs]-[0-9A-Za-z-]{10,}' \
+              -- . ':!.venv' ':!models' ':!vendor' ':!.github/workflows/audited-checks.yml'; then
+            echo "FAIL: possible secret pattern found above"
+            exit 1
+          fi
+          echo "PASS: no secret patterns in tracked source"
+
